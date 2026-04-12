@@ -1,121 +1,204 @@
-# app.py
-from flask import Flask, jsonify
+from flask import Flask, request
 import requests
-from bs4 import BeautifulSoup
-import re
-from datetime import datetime, timedelta
+import yt_dlp
+import time
 
 app = Flask(__name__)
 
-URL = "https://jdwel.com/today/"
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                  "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-}
+PAGE_ACCESS_TOKEN = "EAASKJ7rjAZBUBRCnDeAP8GZC0T0C8yrozZBcAun2cv8buyfMBy7EdNFpzyInRorJQmkq7IKZAwVaCZADbBE3AdUSLAGNZCi1fb4cidZCQkQ0e2wr8MsJtWx4pwUTAZBV6OZCwJNmcu4JtfLZCBnN4uRqIfRBnzLyUWvtoPOGOQeE3sD4XSkIGizvNrFxVQUBnRxK2vRay2ck6nqwZDZD"
+VERIFY_TOKEN = "YOUR_VERIFY_TOKEN"
 
-cached_data = None
-last_update = None
-UPDATE_INTERVAL = timedelta(minutes=5)
+user_results = {}
+last_msg_time = {}
+known_users = {}
 
-def normalize_src(src, base="https://jdwel.com"):
-    if not src:
-        return ""
-    if src.startswith("//"):
-        return "https:" + src
-    if src.startswith("/"):
-        return base.rstrip("/") + src
-    return src
+MAX_SIZE_MB = 20
 
-def clean_name(txt: str) -> str:
-    txt = re.sub(r"(صفحة المباراة|باقي على المباراة.*|لم تبدأ|انتهت|مباشر|LIVE)", "", txt, flags=re.I)
-    txt = re.sub(r"\d+", "", txt)
-    return txt.strip(" -–—: ")
+# =========================
+# إرسال رسالة
+# =========================
+def send_message(psid, text):
+    url = f"https://graph.facebook.com/v18.0/me/messages?access_token={PAGE_ACCESS_TOKEN}"
+    payload = {
+        "recipient": {"id": psid},
+        "message": {"text": text}
+    }
+    requests.post(url, json=payload)
 
-def extract_today_matches():
-    try:
-        res = requests.get(URL, headers=HEADERS, timeout=20)
-        res.raise_for_status()
-        soup = BeautifulSoup(res.text, "html.parser")
-    except:
-        return []
+# =========================
+# إرسال فيديو
+# =========================
+def send_video(psid, video_url):
+    url = f"https://graph.facebook.com/v18.0/me/messages?access_token={PAGE_ACCESS_TOKEN}"
+    payload = {
+        "recipient": {"id": psid},
+        "message": {
+            "attachment": {
+                "type": "video",
+                "payload": {
+                    "url": video_url,
+                    "is_reusable": True
+                }
+            }
+        }
+    }
+    requests.post(url, json=payload)
 
-    results = []
-    seen = set()
+# =========================
+# البحث
+# =========================
+def search_youtube(query):
+    ydl_opts = {
+        "quiet": True,
+        "extract_flat": True,
+        "skip_download": True
+    }
 
-    leagues = soup.select("section, .mec-container, .elementor-widget-wrap, div")
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        data = ydl.extract_info(f"ytsearch10:{query}", download=False)
 
-    for league_block in leagues:
-        league_title = ""
-        title_el = league_block.find(["h2", "h3", "h4", "h5"])
-        if title_el:
-            league_title = title_el.get_text(strip=True)
-        if not league_title or len(league_title) < 3:
-            continue
+    return [
+        {"title": v["title"], "url": v["url"]}
+        for v in data["entries"]
+    ]
 
-        match_blocks = league_block.select(".mec-row, .match-item, li, .mec, .mec-table")
-        for block in match_blocks:
-            txt = block.get_text(" ", strip=True)
-            if not txt:
+# =========================
+# جلب الفيديو
+# =========================
+def get_video_info(url):
+    ydl_opts = {
+        "quiet": True,
+        "format": "best"
+    }
+
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+
+    size = info.get("filesize") or info.get("filesize_approx") or 0
+    size_mb = size / (1024 * 1024)
+
+    return info["url"], size_mb
+
+# =========================
+# Webhook
+# =========================
+@app.route("/webhook", methods=["GET", "POST"])
+def webhook():
+
+    if request.method == "GET":
+        if request.args.get("hub.verify_token") == VERIFY_TOKEN:
+            return request.args.get("hub.challenge")
+        return "error"
+
+    data = request.get_json()
+
+    for entry in data["entry"]:
+        for msg in entry["messaging"]:
+
+            psid = msg["sender"]["id"]
+            now = time.time()
+
+            # Anti-spam
+            if psid in last_msg_time and now - last_msg_time[psid] < 4:
+                send_message(psid, "⛔ صبر شوية")
                 continue
 
-            today_str = datetime.now().strftime("%Y-%m-%d")
-            if today_str not in txt and re.search(r"\d{4}-\d{2}-\d{2}", txt):
+            last_msg_time[psid] = now
+
+            # أول مرة
+            if psid not in known_users:
+                known_users[psid] = True
+
+                send_message(psid,
+                    "👋 مرحبا بك\n\n"
+                    "🔎 اكتب اسم الفيديو\n"
+                    "🎯 اختار رقم من القائمة\n"
+                    f"⚖️ الحد: {MAX_SIZE_MB}MB\n\n"
+                    "📌 أوامر:\n"
+                    "help - شرح\n"
+                    "cancel - إلغاء\n"
+                )
                 continue
 
-            time_match = re.search(r"\b([01]?\d|2[0-3]):[0-5]\d\b", txt)
-            time_ = (time_match.group(0) + ":00") if time_match else ""
+            if "message" not in msg:
+                continue
 
-            if "انتهت" in txt:
-                status = "انتهت"
-            elif "لم تبدأ" in txt:
-                status = "لم تبدأ"
-            elif "مباشر" in txt or "Live" in txt:
-                status = "جارية"
-            else:
-                status = "غير معروف"
+            text = msg["message"].get("text", "").lower().strip()
 
-            imgs = [normalize_src(img.get("src")) for img in block.find_all("img") if img.get("src")]
-            logo_home = imgs[0] if len(imgs) > 0 else ""
-            logo_away = imgs[1] if len(imgs) > 1 else ""
+            # =========================
+            # أوامر
+            # =========================
+            if text == "help":
+                send_message(psid,
+                    "📖 طريقة الاستعمال:\n"
+                    "1️⃣ كتب اسم الفيديو\n"
+                    "2️⃣ اختار رقم\n\n"
+                    "cancel لإلغاء العملية"
+                )
+                continue
 
-            parts = re.split(r"\s+vs\.?\s+|\s+مقابل\s+|\s+[-–—:]\s+", txt)
-            parts = [clean_name(p) for p in parts if p.strip()]
+            if text == "cancel":
+                user_results.pop(psid, None)
+                send_message(psid, "❌ تم الإلغاء")
+                continue
 
-            if len(parts) >= 2:
-                home, away = parts[0], parts[1]
-                key = f"{league_title}-{home}-{away}-{time_}"
-                if key in seen:
+            # =========================
+            # اختيار رقم
+            # =========================
+            if text.isdigit():
+
+                if psid not in user_results:
+                    send_message(psid, "❌ دير بحث الأول")
                     continue
-                seen.add(key)
 
-                results.append({
-                    "league": league_title,
-                    "home": home,
-                    "away": away,
-                    "time": time_,
-                    "status": status,
-                    "logohome": logo_home,
-                    "logoaway": logo_away
-                })
+                choice = int(text)
 
-    return results
+                if 0 < choice <= len(user_results[psid]):
 
-def get_cached_matches():
-    global cached_data, last_update
-    now = datetime.now()
-    if cached_data is None or last_update is None or now - last_update > UPDATE_INTERVAL:
-        cached_data = extract_today_matches()
-        last_update = now
-    # إذا لم توجد مباريات اليوم، نرجع عنصر فارغ
-    if not cached_data:
-        return [{"league":"","home":"","away":"","time":"","status":"","logohome":"","logoaway":""}]
-    return cached_data
+                    video = user_results[psid][choice - 1]
 
-@app.route("/api/abwjdan", methods=["GET"])
-def api_matches():
-    matches = get_cached_matches()
-    return jsonify(matches)
+                    send_message(psid, "⏳ جاري الفحص...")
+
+                    try:
+                        direct_url, size_mb = get_video_info(video["url"])
+
+                        if size_mb > MAX_SIZE_MB:
+                            send_message(psid, f"❌ الفيديو كبير ({round(size_mb,2)}MB)")
+                            continue
+
+                        try:
+                            send_video(psid, direct_url)
+                        except:
+                            send_message(psid, f"🔗 تعذر إرسال الفيديو:\n{video['url']}")
+
+                    except:
+                        send_message(psid, "❌ خطأ في الفيديو")
+
+                else:
+                    send_message(psid, "❌ رقم غير صحيح")
+
+                continue
+
+            # =========================
+            # بحث
+            # =========================
+            results = search_youtube(text)[:7]
+            user_results[psid] = results
+
+            msg_text = "🎬 قائمة الفيديوهات\n"
+            msg_text += "=======================\n"
+
+            for i, v in enumerate(results, 1):
+                msg_text += f"{i} == {v['title'][:40]}\n"
+
+            msg_text += "=======================\n"
+            msg_text += "👉 اختار رقم الفيديو\n"
+            msg_text += "❌ cancel للإلغاء"
+
+            send_message(psid, msg_text)
+
+    return "ok"
+
 
 if __name__ == "__main__":
-    app.run(debug=True)
-        
+    app.run(port=5000, debug=True)
