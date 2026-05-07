@@ -1,204 +1,347 @@
-from flask import Flask, request
+import json
 import requests
 import yt_dlp
+import re
 import time
+from flask import Flask, request
 
 app = Flask(__name__)
 
-PAGE_ACCESS_TOKEN = "EAASKJ7rjAZBUBRCnDeAP8GZC0T0C8yrozZBcAun2cv8buyfMBy7EdNFpzyInRorJQmkq7IKZAwVaCZADbBE3AdUSLAGNZCi1fb4cidZCQkQ0e2wr8MsJtWx4pwUTAZBV6OZCwJNmcu4JtfLZCBnN4uRqIfRBnzLyUWvtoPOGOQeE3sD4XSkIGizvNrFxVQUBnRxK2vRay2ck6nqwZDZD"
-VERIFY_TOKEN = "YOUR_VERIFY_TOKEN"
+PAGE_ACCESS_TOKEN = "IGAARWboxCWU1BZAFpqYTVyOFFHcTlLd3dKcEVZAWTlORU1DRjBsQXAyREk0VDdRZAnpJajM2TU4wN2gyRUoyRlFhdEQ5NUYtNGl6TDM4cjdTbzRzemhBR213MzktS3F0RVhQZAlVlSHQ1a1dDTWlaLXNKdC1YVm9fWXF2Q0ZAFbnktbwZDZD"
+VERIFY_TOKEN = "ddddddddd"
 
-user_results = {}
-last_msg_time = {}
-known_users = {}
+processed_messages = set()
 
-MAX_SIZE_MB = 20
+# ==============================
+# الإحصائيات
+# ==============================
+message_count = 0
+download_count = 0
+total_usage = 0
 
-# =========================
-# إرسال رسالة
-# =========================
-def send_message(psid, text):
-    url = f"https://graph.facebook.com/v18.0/me/messages?access_token={PAGE_ACCESS_TOKEN}"
-    payload = {
-        "recipient": {"id": psid},
-        "message": {"text": text}
+# ==============================
+# احصائيات المنصات
+# ==============================
+platform_stats = {
+    "TikTok":0,
+    "Instagram":0,
+    "YouTube":0,
+    "Facebook":0,
+    "Twitter":0,
+    "Reddit":0
+}
+
+# ==============================
+# منع السبام
+# ==============================
+user_last_request = {}
+
+# ==============================
+# ملف المستخدمين
+# ==============================
+USERS_FILE = "users.txt"
+
+def load_users():
+    try:
+        with open(USERS_FILE,"r") as f:
+            return f.read().splitlines()
+    except:
+        return []
+
+def save_user(user_id):
+    users = load_users()
+    if str(user_id) not in users:
+        with open(USERS_FILE,"a") as f:
+            f.write(str(user_id)+"\n")
+
+# ==============================
+# استخراج الرابط
+# ==============================
+def extract_url(text):
+    urls = re.findall(r'(https?://[^\s]+)', text)
+    if urls:
+        return urls[0]
+    return None
+
+# ==============================
+# كشف المنصة
+# ==============================
+def detect_platform(url):
+    url = url.lower()
+    if "tiktok.com" in url:
+        return "TikTok"
+    if "instagram.com" in url:
+        return "Instagram"
+    if "youtube.com" in url or "youtu.be" in url:
+        return "YouTube"
+    if "facebook.com" in url or "fb.watch" in url:
+        return "Facebook"
+    if "twitter.com" in url or "x.com" in url:
+        return "Twitter"
+    if "reddit.com" in url:
+        return "Reddit"
+    return "Unknown"
+
+# ==============================
+# تحميل الفيديو
+# ==============================
+def download_video(url):
+    ydl_opts = {
+        "format":"best",
+        "quiet":True
     }
-    requests.post(url, json=payload)
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url,download=False)
+        return info
 
-# =========================
-# إرسال فيديو
-# =========================
-def send_video(psid, video_url):
-    url = f"https://graph.facebook.com/v18.0/me/messages?access_token={PAGE_ACCESS_TOKEN}"
+# ==============================
+# Webhook Verification
+# ==============================
+@app.route('/webhook',methods=['GET'])
+def verify():
+    mode = request.args.get("hub.mode")
+    token = request.args.get("hub.verify_token")
+    challenge = request.args.get("hub.challenge")
+    if mode == "subscribe" and token == VERIFY_TOKEN:
+        return challenge,200
+    return "Forbidden",403
+
+# ==============================
+# المتغيرات الجديدة للرسائل التلقائية والإعلانات
+# ==============================
+auto_message = None
+auto_pub_message = None
+auto_pub_link = None
+
+# ==============================
+# Webhook الرئيسي
+# ==============================
+@app.route('/webhook',methods=['POST'])
+def webhook():
+    global message_count, download_count, total_usage
+    global auto_message, auto_pub_message, auto_pub_link
+
+    data = request.json
+    print(json.dumps(data, indent=2))
+
+    # الرد على التعليقات
+    for entry in data.get("entry", []):
+        for change in entry.get("changes", []):
+            if change.get("field") == "comments":
+                comment_data = change.get("value", {})
+                comment_id = comment_data.get("id")
+                if not comment_id:
+                    continue
+                reply_to_comment(comment_id, "💚💢💌")
+
+    # رسائل الخاص
+    if data.get("object") != "instagram":
+        return "OK", 200
+
+    for entry in data.get("entry", []):
+        for event in entry.get("messaging", []):
+            sender_id = event.get("sender", {}).get("id")
+            if not sender_id or "message" not in event:
+                continue
+
+            message = event["message"]
+            message_id = message.get("mid")
+            if message_id in processed_messages:
+                continue
+            processed_messages.add(message_id)
+            message_count += 1
+            save_user(sender_id)
+            text = message.get("text","")
+            now = time.time()
+
+            if sender_id in user_last_request and now - user_last_request[sender_id] < 5:
+                send_reply(sender_id, "⚠️ انتظر 10 ثواني قبل إرسال رابط جديد")
+                return "OK", 200
+            user_last_request[sender_id] = now
+
+            # ======= الأوامر =======
+            if text == "/user":
+                send_reply(sender_id, f"""📊 إحصائيات البوت
+📩 عدد الرسائل: {message_count}
+🎬 عدد الفيديوهات: {download_count}
+📈 إجمالي الاستخدام: {total_usage}
+""")
+                return "OK", 200
+
+            if text == "/stats":
+                stats_text = "📊 إحصائيات المنصات\n\n"
+                for p, v in platform_stats.items():
+                    stats_text += f"{p} : {v}\n"
+                send_reply(sender_id, stats_text)
+                return "OK", 200
+
+            if text.startswith("/message"):
+                msg = text.replace("/message", "").strip()
+                users = load_users()
+                for u in users:
+                    send_reply(u, f"📢 رسالة:\n\n{msg}")
+                send_reply(sender_id, f"✅ تم إرسال الرسالة إلى {len(users)} مستخدم")
+                return "OK", 200
+
+            # /hi
+            if text.startswith("/hi"):
+                msg = text.replace("/hi","").strip()
+                if msg == "":
+                    send_reply(sender_id, "❌ كتب الرسالة بعد /hi")
+                    return "OK", 200
+                auto_message = msg
+                send_reply(sender_id, f"✅ تم تشغيل الرسالة التلقائية:\n\n{msg}")
+                return "OK", 200
+
+            # /histop
+            if text == "/histop":
+                auto_message = None
+                send_reply(sender_id, "🛑 تم إيقاف الرسالة التلقائية")
+                return "OK", 200
+
+            # /menu
+            if text == "/menu":
+                menu_text = """📜 قائمة الأوامر:
+/user - إحصائيات البوت
+/stats - إحصائيات المنصات
+/message <نص> - إرسال رسالة لكل المستخدمين
+/hi <نص> - تشغيل رسالة تلقائية بعد كل فيديو
+/histop - إيقاف الرسالة التلقائية
+/menu - عرض قائمة الأوامر
+/pub <نص>|<رابط> - تعيين الإعلان الذي يرسل بعد كل فيديو
+/pubstop - إيقاف الإعلان التلقائي
+"""
+                send_reply(sender_id, menu_text)
+                return "OK", 200
+
+            # /pub
+            if text.startswith("/pub"):
+                parts = text.replace("/pub","").strip().split("|")
+                if len(parts) != 2:
+                    send_reply(sender_id, "❌ استعمل: /pub <نص الرسالة>|<رابط>")
+                    return "OK", 200
+                auto_pub_message, auto_pub_link = parts[0].strip(), parts[1].strip()
+                send_reply(sender_id, f"✅ تم تفعيل الإعلان التلقائي بعد كل فيديو")
+                return "OK", 200
+
+            # /pubstop
+            if text == "/pubstop":
+                auto_pub_message, auto_pub_link = None, None
+                send_reply(sender_id, "🛑 تم إيقاف الإعلان التلقائي")
+                return "OK", 200
+
+            # التعامل مع الفيديوهات
+            if "attachments" in message:
+                for att in message["attachments"]:
+                    if att["type"] == "ig_reel" and "url" in att["payload"]:
+                        send_reply(sender_id, "⏳ يتم تحميل REEL")
+                        reel_url = att["payload"]["url"]
+                        send_video(sender_id, reel_url)
+                        download_count += 1
+                        total_usage += 1
+                        platform_stats["Instagram"] += 1
+                        # رسالة /hi
+                        if auto_message:
+                            send_reply(sender_id, auto_message)
+                        # إرسال الإعلان بعد الفيديو
+                        if auto_pub_message and auto_pub_link:
+                            send_button_message(sender_id, auto_pub_message, auto_pub_link)
+                        return "OK", 200
+
+                    if att["type"] in ["story","ig_story"]:
+                        payload = att.get("payload",{})
+                        story_url = payload.get("url") or payload.get("story_media_url")
+                        if story_url:
+                            send_reply(sender_id, "⏳ جاري تحميل STORI")
+                            send_video(sender_id, story_url)
+                            download_count += 1
+                            total_usage += 1
+                            platform_stats["Instagram"] += 1
+                            if auto_message:
+                                send_reply(sender_id, auto_message)
+                            if auto_pub_message and auto_pub_link:
+                                send_button_message(sender_id, auto_pub_message, auto_pub_link)
+                            return "OK", 200
+
+            url = extract_url(text)
+            if url:
+                platform = detect_platform(url)
+                send_reply(sender_id, f"⏳ جاري تحميل الفيديو من {platform}")
+                try:
+                    info = download_video(url)
+                    if platform == "YouTube" and info.get("duration",0) > 300:
+                        send_reply(sender_id, "❌ فيديو YouTube يجب أن يكون أقل من 5 دقائق")
+                        return "OK", 200
+                    video_url = info["url"]
+                    send_video(sender_id, video_url)
+                    download_count += 1
+                    total_usage += 1
+                    if platform in platform_stats:
+                        platform_stats[platform] += 1
+                    if auto_message:
+                        send_reply(sender_id, auto_message)
+                    if auto_pub_message and auto_pub_link:
+                        send_button_message(sender_id, auto_pub_message, auto_pub_link)
+                except:
+                    send_reply(sender_id, "❌ لم أستطع تحميل الفيديو")
+            else:
+                send_reply(sender_id, "قوم بي ارسال ريلز او صطوري من اجل تحميل 🎶")
+
+    return "OK",200
+
+# ==============================
+# إرسال رسالة بزر (للإعلان)
+# ==============================
+def send_button_message(user_id, text, url):
+    endpoint = f"https://graph.instagram.com/v19.0/me/messages?access_token={PAGE_ACCESS_TOKEN}"
     payload = {
-        "recipient": {"id": psid},
+        "recipient": {"id": user_id},
+        "messaging_type": "RESPONSE",
         "message": {
             "attachment": {
-                "type": "video",
+                "type": "template",
                 "payload": {
-                    "url": video_url,
-                    "is_reusable": True
+                    "template_type": "button",
+                    "text": text,
+                    "buttons": [
+                        {"type": "web_url", "url": url, "title": "فتح "}
+                    ]
                 }
             }
         }
     }
-    requests.post(url, json=payload)
+    requests.post(endpoint, json=payload)
 
-# =========================
-# البحث
-# =========================
-def search_youtube(query):
-    ydl_opts = {
-        "quiet": True,
-        "extract_flat": True,
-        "skip_download": True
+# ==============================
+# الرد على التعليق
+# ==============================
+def reply_to_comment(comment_id,text):
+    url = f"https://graph.facebook.com/v19.0/{comment_id}/replies"
+    payload = {"message":text,"access_token":PAGE_ACCESS_TOKEN}
+    requests.post(url,data=payload)
+
+# ==============================
+# إرسال رسالة نصية
+# ==============================
+def send_reply(user_id,text):
+    endpoint = f"https://graph.instagram.com/v19.0/me/messages?access_token={PAGE_ACCESS_TOKEN}"
+    payload = {"recipient":{"id":user_id},"messaging_type":"RESPONSE","message":{"text":text}}
+    requests.post(endpoint,json=payload)
+
+# ==============================
+# إرسال فيديو
+# ==============================
+def send_video(user_id,url):
+    endpoint = f"https://graph.instagram.com/v19.0/me/messages?access_token={PAGE_ACCESS_TOKEN}"
+    payload = {
+        "recipient":{"id":user_id},
+        "messaging_type":"RESPONSE",
+        "message":{"attachment":{"type":"video","payload":{"url":url}}}
     }
+    requests.post(endpoint,json=payload)
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        data = ydl.extract_info(f"ytsearch10:{query}", download=False)
-
-    return [
-        {"title": v["title"], "url": v["url"]}
-        for v in data["entries"]
-    ]
-
-# =========================
-# جلب الفيديو
-# =========================
-def get_video_info(url):
-    ydl_opts = {
-        "quiet": True,
-        "format": "best"
-    }
-
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=False)
-
-    size = info.get("filesize") or info.get("filesize_approx") or 0
-    size_mb = size / (1024 * 1024)
-
-    return info["url"], size_mb
-
-# =========================
-# Webhook
-# =========================
-@app.route("/webhook", methods=["GET", "POST"])
-def webhook():
-
-    if request.method == "GET":
-        if request.args.get("hub.verify_token") == VERIFY_TOKEN:
-            return request.args.get("hub.challenge")
-        return "error"
-
-    data = request.get_json()
-
-    for entry in data["entry"]:
-        for msg in entry["messaging"]:
-
-            psid = msg["sender"]["id"]
-            now = time.time()
-
-            # Anti-spam
-            if psid in last_msg_time and now - last_msg_time[psid] < 4:
-                send_message(psid, "⛔ صبر شوية")
-                continue
-
-            last_msg_time[psid] = now
-
-            # أول مرة
-            if psid not in known_users:
-                known_users[psid] = True
-
-                send_message(psid,
-                    "👋 مرحبا بك\n\n"
-                    "🔎 اكتب اسم الفيديو\n"
-                    "🎯 اختار رقم من القائمة\n"
-                    f"⚖️ الحد: {MAX_SIZE_MB}MB\n\n"
-                    "📌 أوامر:\n"
-                    "help - شرح\n"
-                    "cancel - إلغاء\n"
-                )
-                continue
-
-            if "message" not in msg:
-                continue
-
-            text = msg["message"].get("text", "").lower().strip()
-
-            # =========================
-            # أوامر
-            # =========================
-            if text == "help":
-                send_message(psid,
-                    "📖 طريقة الاستعمال:\n"
-                    "1️⃣ كتب اسم الفيديو\n"
-                    "2️⃣ اختار رقم\n\n"
-                    "cancel لإلغاء العملية"
-                )
-                continue
-
-            if text == "cancel":
-                user_results.pop(psid, None)
-                send_message(psid, "❌ تم الإلغاء")
-                continue
-
-            # =========================
-            # اختيار رقم
-            # =========================
-            if text.isdigit():
-
-                if psid not in user_results:
-                    send_message(psid, "❌ دير بحث الأول")
-                    continue
-
-                choice = int(text)
-
-                if 0 < choice <= len(user_results[psid]):
-
-                    video = user_results[psid][choice - 1]
-
-                    send_message(psid, "⏳ جاري الفحص...")
-
-                    try:
-                        direct_url, size_mb = get_video_info(video["url"])
-
-                        if size_mb > MAX_SIZE_MB:
-                            send_message(psid, f"❌ الفيديو كبير ({round(size_mb,2)}MB)")
-                            continue
-
-                        try:
-                            send_video(psid, direct_url)
-                        except:
-                            send_message(psid, f"🔗 تعذر إرسال الفيديو:\n{video['url']}")
-
-                    except:
-                        send_message(psid, "❌ خطأ في الفيديو")
-
-                else:
-                    send_message(psid, "❌ رقم غير صحيح")
-
-                continue
-
-            # =========================
-            # بحث
-            # =========================
-            results = search_youtube(text)[:7]
-            user_results[psid] = results
-
-            msg_text = "🎬 قائمة الفيديوهات\n"
-            msg_text += "=======================\n"
-
-            for i, v in enumerate(results, 1):
-                msg_text += f"{i} == {v['title'][:40]}\n"
-
-            msg_text += "=======================\n"
-            msg_text += "👉 اختار رقم الفيديو\n"
-            msg_text += "❌ cancel للإلغاء"
-
-            send_message(psid, msg_text)
-
-    return "ok"
-
-
+# ==============================
+# تشغيل السيرفر
+# ==============================
 if __name__ == "__main__":
-    app.run(port=5000, debug=True)
+    app.run(host="0.0.0.0",port=13833)
